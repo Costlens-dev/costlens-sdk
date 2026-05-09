@@ -1,5 +1,5 @@
 {
-  "name": "costlens",
+  "name": "@lens360/sdk",
   "version": "1.3.3",
   "description": "Smart AI cost optimization with OpenAI and Anthropic support. Automatically routes expensive models to cheaper alternatives while maintaining quality and preventing downgrades.",
   "main": "dist/index.js",
