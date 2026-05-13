@@ -697,10 +697,11 @@ export class CostLens {
           async create(params: any, options?: WrapperOptions) {
             // PROXY MODE — route through CostLens API
             if (self.config.proxy) {
-              const proxyUrl = self.config.proxyUrl || 'https://api.costlens.dev/v1/proxy/chat/completions';
+              const proxyUrl =
+                self.config.proxyUrl || 'https://api.costlens.dev/v1/proxy/chat/completions';
               const headers: Record<string, string> = {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${self.config.apiKey}`,
+                Authorization: `Bearer ${self.config.apiKey}`,
                 'X-Provider-Key': client.apiKey || process.env.OPENAI_API_KEY || '',
               };
               if (self.config.sessionId) headers['X-Session-Id'] = self.config.sessionId;
