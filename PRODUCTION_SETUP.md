@@ -124,7 +124,7 @@ Monitor these key metrics:
 ### Support
 
 For production support:
-- GitHub Issues: https://github.com/Jrmromao/costlens-sdk/issues
+- GitHub Issues: https://github.com/costlens-dev/costlens-sdk/issues
 - Documentation: https://costlens.dev
 - Email: support@costlens.dev
 

@@ -70,7 +70,7 @@
 
 ## Community Requests
 
-Track feature requests at: https://github.com/Jrmromao/costlens-sdk/issues
+Track feature requests at: https://github.com/costlens-dev/costlens-sdk/issues
 
 ---
 
