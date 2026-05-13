@@ -20,6 +20,11 @@ interface CostLensConfig {
   ) => Promise<string | null> | string | null;
   qualityValidator?: (responseText: string, messagesJson: string) => Promise<number> | number; // return 0..1 quality score
 
+  // Proxy mode — routes through CostLens API for kill switch, budgets, server-side routing
+  proxy?: boolean;
+  proxyUrl?: string;
+  sessionId?: string;
+
   // NEW: Multi-provider configuration
   providers?: ProviderConfig[];
   routingStrategy?: 'balanced' | 'quality-first' | 'cost-first' | 'custom';
@@ -690,6 +695,31 @@ export class CostLens {
       chat: {
         completions: {
           async create(params: any, options?: WrapperOptions) {
+            // PROXY MODE — route through CostLens API
+            if (self.config.proxy) {
+              const proxyUrl = self.config.proxyUrl || 'https://api.costlens.dev/v1/proxy/chat/completions';
+              const headers: Record<string, string> = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${self.config.apiKey}`,
+                'X-Provider-Key': client.apiKey || process.env.OPENAI_API_KEY || '',
+              };
+              if (self.config.sessionId) headers['X-Session-Id'] = self.config.sessionId;
+
+              const res = await fetch(proxyUrl, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(params),
+              });
+
+              if (!res.ok) {
+                const errBody = await res.json().catch(() => ({ error: res.statusText }));
+                throw new Error((errBody as any).error || `Proxy error: ${res.status}`);
+              }
+
+              if (params.stream) return res.body;
+              return res.json();
+            }
+
             // Auto-optimize prompts
             if (self.config.autoOptimize && params.messages) {
               for (const message of params.messages) {
