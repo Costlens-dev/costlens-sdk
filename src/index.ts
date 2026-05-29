@@ -506,10 +506,6 @@ export class CostLens {
           this.resetApiFailures();
         }
 
-        // Handle instant mode response
-        if (false) {
-          const result = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-        }
       }
     } catch (error) {
       this.recordApiFailure();
