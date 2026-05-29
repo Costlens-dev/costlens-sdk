@@ -4,7 +4,7 @@ import { SmartCall } from './smartCall';
 import { QualityDetector } from './qualityDetector';
 
 interface CostLensConfig {
-  apiKey?: string; // Made optional for instant mode
+  apiKey: string; // Required — get yours at costlens.dev/settings
   baseUrl?: string;
   enableCache?: boolean;
   maxRetries?: number;
@@ -165,27 +165,25 @@ export class CostLens {
   private circuitBreakerThreshold = 5; // Fail 5 times in a row
   private circuitBreakerTimeout = 60000; // 1 minute
   private _routingDisabledLogged = false;
-  private mode: 'cloud' | 'instant';
-  private sessionId?: string;
+  private mode: 'cloud';
 
   constructor(config: CostLensConfig = {}) {
+    if (!config.apiKey || config.apiKey.trim() === '') {
+      throw new Error('CostLens: apiKey is required. Get your key at https://costlens.dev/settings');
+    }
+
     this.config = {
       baseUrl: 'https://api.costlens.dev',
       enableCache: true,
       maxRetries: 3,
       middleware: [],
       autoFallback: true,
-      smartRouting: true, // ON by default
-      logLevel: 'warn', // Default to warn level
+      smartRouting: true,
+      logLevel: 'warn',
       ...config,
     };
 
-    // Detect mode based on API key presence
-    this.mode = config.apiKey && config.apiKey.trim() !== '' ? 'cloud' : 'instant';
-
-    if (this.mode === 'instant') {
-      this.log('info', '✨ Instant Mode: Working locally. Upgrade for cloud tracking.');
-    }
+    this.mode = 'cloud';
   }
 
   private log(level: 'info' | 'warn' | 'error', message: string, ...args: any[]): void {
