@@ -6,6 +6,7 @@ import { QualityDetector } from './qualityDetector';
 interface CostLensConfig {
   apiKey: string; // Required — get yours at costlens.dev/settings
   baseUrl?: string;
+  sessionId?: string;
   enableCache?: boolean;
   maxRetries?: number;
   middleware?: Middleware[];
@@ -23,7 +24,6 @@ interface CostLensConfig {
   // Proxy mode — routes through CostLens API for kill switch, budgets, server-side routing
   proxy?: boolean;
   proxyUrl?: string;
-  sessionId?: string;
 
   // NEW: Multi-provider configuration
   providers?: ProviderConfig[];
@@ -167,7 +167,7 @@ export class CostLens {
   private _routingDisabledLogged = false;
   private mode: 'cloud';
 
-  constructor(config: CostLensConfig = {}) {
+  constructor(config: CostLensConfig) {
     if (!config.apiKey || config.apiKey.trim() === '') {
       throw new Error('CostLens: apiKey is required. Get your key at https://costlens.dev/settings');
     }
@@ -451,11 +451,8 @@ export class CostLens {
 
   private async trackRun(data: TrackRunData): Promise<void> {
     try {
-      // Choose endpoint based on mode
-      const endpoint =
-        this.mode === 'instant'
-          ? `${this.config.baseUrl}/api/integrations/run/instant`
-          : `${this.config.baseUrl}/api/integrations/run`;
+      // Endpoint
+      const endpoint = `${this.config.baseUrl}/api/integrations/run`;
 
       // Circuit breaker: skip tracking if API is down (cloud mode only)
       if (this.mode === 'cloud' && this.isApiDown()) {
@@ -491,16 +488,6 @@ export class CostLens {
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        // Handle rate limits for instant mode
-        if (response.status === 429 && this.mode === 'instant') {
-          const errorData = (await response.json().catch(() => ({}))) as { upgradeUrl?: string };
-          this.log(
-            'warn',
-            'Rate limit exceeded. Upgrade for unlimited tracking:',
-            errorData.upgradeUrl
-          );
-          return; // Don't throw, just skip tracking
-        }
 
         // Track API failures for circuit breaker (cloud mode only)
         if (this.mode === 'cloud') {
@@ -520,64 +507,17 @@ export class CostLens {
         }
 
         // Handle instant mode response
-        if (this.mode === 'instant') {
-          const result = (await response.json().catch(() => ({}))) as {
-            sessionId?: string;
-            upgradePrompt?: {
-              message: string;
-              upgradeUrl: string;
-              showAt: boolean;
-            };
-          };
-
-          // Store sessionId for analytics
-          if (result.sessionId) {
-            this.sessionId = result.sessionId;
-          }
-
-          // Show upgrade prompt if needed
-          if (result.upgradePrompt?.showAt) {
-            this.log('info', result.upgradePrompt.message);
-            this.log('info', `Upgrade: ${result.upgradePrompt.upgradeUrl}`);
-          }
+        if (false) {
+          const result = (await response.json().catch(() => ({}))) as Record<string, unknown>;
         }
       }
     } catch (error) {
-      // Track API failures for circuit breaker (cloud mode only)
-      if (this.mode === 'cloud') {
-        this.recordApiFailure();
-      }
+      this.recordApiFailure();
 
-      // Only log if it's not a timeout (to reduce noise)
       if ((error as Error).name !== 'AbortError') {
         this.log('warn', 'Tracking error (non-fatal):', error);
       }
     }
-  }
-
-  /**
-   * Get analytics URL for instant mode sessions
-   * @returns Analytics URL if in instant mode and sessionId exists, null otherwise
-   */
-  public getAnalyticsUrl(): string | null {
-    if (this.mode === 'instant' && this.sessionId) {
-      return `https://costlens.dev/analytics/instant?sessionId=${this.sessionId}`;
-    }
-    return null;
-  }
-
-  /**
-   * Get current mode (cloud or instant)
-   */
-  public getMode(): 'cloud' | 'instant' {
-    return this.mode;
-  }
-
-  /**
-   * Get session ID for instant mode
-   */
-  public getSessionId(): string | undefined {
-    return this.sessionId;
   }
 
   private getCacheKey(provider: string, params: any): string {
