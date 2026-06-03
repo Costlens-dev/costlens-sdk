@@ -642,10 +642,10 @@ describe('CostLens SDK - Unit Tests', () => {
       })).resolves.toBeDefined();
     });
 
-    it('should handle client creation errors', () => {
+    it('should throw on empty API key', () => {
       expect(() => {
         new CostLens({ apiKey: '' });
-      }).not.toThrow();
+      }).toThrow('apiKey is required');
     });
 
     it('should handle invalid configuration gracefully', () => {
@@ -660,28 +660,12 @@ describe('CostLens SDK - Unit Tests', () => {
   });
 
   describe('API Key Validation', () => {
-    it('should initialize silently when no API key is provided (instant mode)', () => {
-      const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
-      
-      const costlens = new CostLens({ apiKey: '' });
-      
-      // Should not warn - instant mode works silently
-      expect(consoleSpy).not.toHaveBeenCalled();
-      expect(costlens).toBeInstanceOf(CostLens);
-      
-      consoleSpy.mockRestore();
+    it('should throw when no API key is provided', () => {
+      expect(() => new CostLens({ apiKey: '' })).toThrow('apiKey is required');
     });
 
-    it('should initialize silently when API key is only whitespace (instant mode)', () => {
-      const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
-      
-      const costlens = new CostLens({ apiKey: '   ' });
-      
-      // Should not warn - instant mode works silently
-      expect(consoleSpy).not.toHaveBeenCalled();
-      expect(costlens).toBeInstanceOf(CostLens);
-      
-      consoleSpy.mockRestore();
+    it('should throw when API key is only whitespace', () => {
+      expect(() => new CostLens({ apiKey: '   ' })).toThrow('apiKey is required');
     });
 
     it('should not warn when valid API key is provided', () => {
