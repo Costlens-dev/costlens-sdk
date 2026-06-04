@@ -1,169 +1,48 @@
 import type OpenAI from 'openai';
 import type Anthropic from '@anthropic-ai/sdk';
-import { SmartCall } from './smartCall';
 import { QualityDetector } from './qualityDetector';
+import { selectOptimalModel, getDefaultFallbacks } from './routing';
+import { getModelPricing, estimateTokens as estimateTokenCount } from './pricing';
+import { LRUCache, getCacheKey } from './cache';
+import { CircuitBreaker } from './circuit-breaker';
 
-interface CostLensConfig {
-  apiKey: string; // Required — get yours at costlens.dev/settings
-  baseUrl?: string;
-  sessionId?: string;
-  enableCache?: boolean;
-  maxRetries?: number;
-  middleware?: Middleware[];
-  autoFallback?: boolean;
-  smartRouting?: boolean;
-  autoOptimize?: boolean;
-  costLimit?: number;
-  logLevel?: 'silent' | 'error' | 'warn' | 'info';
-  routingPolicy?: (
-    requestedModel: string,
-    messages: any[]
-  ) => Promise<string | null> | string | null;
-  qualityValidator?: (responseText: string, messagesJson: string) => Promise<number> | number; // return 0..1 quality score
+export type {
+  CostLensConfig,
+  WrapperOptions,
+  TrackRunData,
+  Middleware,
+  ErrorContext,
+  ProviderConfig,
+  RoutingDecision,
+  RoutingOptions,
+  BatchRequest,
+  BatchResult,
+} from './types';
 
-  // Proxy mode — routes through CostLens API for kill switch, budgets, server-side routing
-  proxy?: boolean;
-  proxyUrl?: string;
-
-  // NEW: Multi-provider configuration
-  providers?: ProviderConfig[];
-  routingStrategy?: 'balanced' | 'quality-first' | 'cost-first' | 'custom';
-  enforceModel?: boolean;
-  qualityThreshold?: number;
-  enableQualityValidation?: boolean;
-  enableBatchProcessing?: boolean;
-  enableCircuitBreaker?: boolean;
-}
-
-interface WrapperOptions {
-  promptId?: string;
-  cacheTTL?: number;
-  fallbackModels?: string[];
-  maxCost?: number;
-  userId?: string;
-  requestId?: string;
-  correlationId?: string;
-}
-
-interface TrackRunData {
-  provider: string;
-  promptId?: string;
-  model: string;
-  requestedModel?: string;
-  input: string;
-  output: string;
-  tokensUsed: number;
-  inputTokens?: number;
-  outputTokens?: number;
-  latency: number;
-  success: boolean;
-  savings?: number;
-  error?: string;
-  requestId?: string;
-  correlationId?: string;
-}
-
-interface Middleware {
-  before?: (params: any) => Promise<any>;
-  after?: (result: any) => Promise<any>;
-  onError?: (error: Error, context?: ErrorContext) => Promise<void>;
-}
-
-interface ErrorContext {
-  provider: string;
-  model: string;
-  input: string;
-  latency: number;
-  attempt: number;
-  maxRetries: number;
-  userId?: string;
-  promptId?: string;
-  metadata?: Record<string, any>;
-}
-
-interface CacheEntry {
-  result: any;
-  timestamp: number;
-  ttl: number;
-  lastAccessed?: number;
-}
-
-// NEW: Multi-provider interfaces
-interface ProviderConfig {
-  provider: string;
-  model?: string;
-  weight: number;
-  minQuality: number;
-  enforceModel: boolean;
-  routingStrategy: string;
-  apiKeyEncrypted?: string;
-  enabled: boolean;
-}
-
-interface QualityValidator {
-  threshold: number;
-  enabled: boolean;
-  metrics: string[];
-}
-
-interface QualityScore {
-  overall: number;
-  coherence: number;
-  completeness: number;
-  relevance: number;
-  passed: boolean;
-}
-
-interface RoutingDecision {
-  selectedModel: string;
-  provider: string;
-  originalModel: string;
-  confidence: number;
-  reasoning: string;
-  estimatedCost: number;
-  qualityScore: number;
-}
-
-interface RoutingOptions {
-  enforceModel?: boolean;
-  qualityThreshold?: number;
-  maxCost?: number;
-  strategy?: string;
-}
-
-interface ProviderApiKey {
-  id: string;
-  provider: string;
-  createdAt: string;
-  lastUsedAt?: string;
-}
-
-interface BatchRequest {
-  provider?: string;
-  model: string;
-  prompt?: string;
-  tokens?: number;
-  latency?: number;
-  options?: RoutingOptions;
-}
-
-interface BatchResult {
-  success: boolean;
-  result?: any;
-  error?: string;
-  routingDecision?: RoutingDecision;
-}
+import type {
+  CostLensConfig,
+  WrapperOptions,
+  TrackRunData,
+  Middleware,
+  ErrorContext,
+  ProviderConfig,
+  RoutingDecision,
+  RoutingOptions,
+  BatchRequest,
+  BatchResult,
+  CacheEntry,
+  QualityValidator,
+  QualityScore,
+  ProviderApiKey,
+} from './types';
 
 export class CostLens {
   private config: CostLensConfig;
-  private cache: Map<string, CacheEntry> = new Map();
+  private cache: LRUCache = new LRUCache();
   private optimizationCache: Map<string, string> = new Map();
   private rateLimitQueue: Array<() => Promise<any>> = [];
   private isProcessingQueue = false;
-  private apiFailureCount = 0;
-  private lastApiFailure = 0;
-  private circuitBreakerThreshold = 5; // Fail 5 times in a row
-  private circuitBreakerTimeout = 60000; // 1 minute
+  private circuitBreaker = new CircuitBreaker();
   private _routingDisabledLogged = false;
   private mode: 'cloud';
 
@@ -236,39 +115,39 @@ export class CostLens {
     const complexity = this.estimateComplexity(messages);
     const taskType = this.detectTaskType(messages);
 
-    // PRIORITY 1: OpenAI routing (works for 90% of users)
-    if (requestedModel.includes('gpt')) {
-      // Simple tasks: GPT-4 → GPT-3.5-turbo (98% savings)
-      if (complexity === 'simple' && requestedModel.includes('gpt-4')) {
-        return 'gpt-3.5-turbo';
+    // PRIORITY 1: OpenAI routing
+    if (requestedModel.includes('gpt') || requestedModel.includes('o4') || requestedModel.includes('o3')) {
+      // Simple tasks: expensive models → GPT-4o-mini (95%+ savings)
+      if (complexity === 'simple' && (requestedModel.includes('gpt-4') || requestedModel.includes('gpt-5'))) {
+        return 'gpt-4o-mini';
       }
 
-      // Medium tasks: GPT-4 → GPT-4o (86% savings)
-      if (complexity === 'medium' && requestedModel === 'gpt-4') {
+      // Medium tasks: GPT-5/4 → GPT-4o (significant savings)
+      if (complexity === 'medium' && (requestedModel === 'gpt-4' || requestedModel.includes('gpt-5'))) {
         return 'gpt-4o';
       }
 
-      // Coding tasks: GPT-4 → Claude 3.5 Sonnet (better at code, cheaper)
-      if (taskType.includes('coding') && requestedModel.includes('gpt-4')) {
-        return 'claude-3.5-sonnet';
+      // Reasoning tasks: o4/o3 → o4-mini for simple tasks
+      if (complexity === 'simple' && (requestedModel.includes('o4') || requestedModel.includes('o3'))) {
+        return 'o4-mini';
       }
     }
 
-    // PRIORITY 1.5: Anthropic routing (for Claude users)
+    // PRIORITY 1.5: Anthropic routing
     if (requestedModel.includes('claude')) {
-      // Simple tasks: Claude Opus → Claude Haiku (98% savings)
-      if (complexity === 'simple' && requestedModel.includes('claude-3-opus')) {
-        return 'claude-3-haiku';
+      // Simple tasks: Opus → Haiku (98% savings)
+      if (complexity === 'simple' && requestedModel.includes('opus')) {
+        return 'claude-3-5-haiku-latest';
       }
 
-      // Medium tasks: Claude Opus → Claude 3.5 Sonnet (93% savings)
-      if (complexity === 'medium' && requestedModel.includes('claude-3-opus')) {
-        return 'claude-3.5-sonnet';
+      // Medium tasks: Opus → Sonnet (90% savings)
+      if (complexity === 'medium' && requestedModel.includes('opus')) {
+        return 'claude-sonnet-4-20250514';
       }
 
-      // Simple tasks: Claude Sonnet → Claude Haiku (92% savings)
-      if (complexity === 'simple' && requestedModel.includes('claude-3-sonnet')) {
-        return 'claude-3-haiku';
+      // Simple tasks: Sonnet → Haiku (85% savings)
+      if (complexity === 'simple' && requestedModel.includes('sonnet')) {
+        return 'claude-3-5-haiku-latest';
       }
     }
 
@@ -327,23 +206,27 @@ export class CostLens {
 
   private getDefaultFallbacks(model: string): string[] {
     const fallbacks: Record<string, string[]> = {
-      // 2025 Models (prioritize new models)
-      'gpt-4o': ['gpt-4-turbo', 'claude-3.5-sonnet', 'gpt-3.5-turbo'],
-      'claude-3.5-sonnet': ['gpt-4o', 'claude-3-sonnet', 'gpt-3.5-turbo'],
-      'gemini-1.5-flash': ['gemini-1.5-pro', 'gpt-3.5-turbo', 'claude-3-haiku'],
+      // 2026 Models
+      'gpt-5.5': ['gpt-4o', 'gpt-4o-mini'],
+      'gpt-4o': ['gpt-4o-mini', 'claude-3-5-haiku-latest'],
+      'gpt-4o-mini': ['claude-3-5-haiku-latest'],
+      'o4-mini': ['gpt-4o-mini', 'claude-3-5-haiku-latest'],
+      'o4': ['o4-mini', 'gpt-4o'],
+      'o3': ['o4-mini', 'gpt-4o'],
+      'claude-opus-4': ['claude-sonnet-4-20250514', 'claude-3-5-haiku-latest'],
+      'claude-sonnet-4': ['claude-3-5-haiku-latest', 'gpt-4o-mini'],
+      'claude-3-5-haiku': ['gpt-4o-mini'],
 
-      // Legacy Models
-      'gpt-4': ['gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo'],
-      'gpt-4-turbo': ['gpt-4o', 'gpt-4', 'gpt-3.5-turbo'],
-      'gpt-3.5-turbo': ['gpt-4o', 'gemini-1.5-flash', 'claude-3-haiku'],
-      'claude-3-opus': ['claude-3.5-sonnet', 'claude-3-sonnet', 'gpt-4o'],
-      'claude-3-sonnet': ['claude-3.5-sonnet', 'claude-3-haiku', 'gpt-3.5-turbo'],
-      'claude-3-haiku': ['gpt-3.5-turbo', 'gemini-1.5-flash', 'claude-3-sonnet'],
-      'gemini-1.5-pro': ['gemini-1.5-flash', 'gpt-4o', 'gpt-3.5-turbo'],
-      'deepseek-v3': ['deepseek-chat', 'deepseek-reasoner', 'gemini-1.5-flash', 'gpt-3.5-turbo'],
-      'deepseek-r1': ['deepseek-chat', 'deepseek-reasoner', 'gemini-1.5-flash', 'gpt-3.5-turbo'],
-      'deepseek-chat': ['deepseek-reasoner', 'deepseek-v3', 'gemini-1.5-flash', 'gpt-3.5-turbo'],
-      'deepseek-reasoner': ['deepseek-chat', 'deepseek-v3', 'gemini-1.5-flash', 'gpt-3.5-turbo'],
+      // Legacy models (still used by some)
+      'gpt-4': ['gpt-4o', 'gpt-4o-mini'],
+      'gpt-4-turbo': ['gpt-4o', 'gpt-4o-mini'],
+      'gpt-3.5-turbo': ['gpt-4o-mini'],
+      'claude-3-opus': ['claude-sonnet-4-20250514', 'claude-3-5-haiku-latest'],
+      'claude-3.5-sonnet': ['claude-3-5-haiku-latest', 'gpt-4o-mini'],
+      'claude-3-sonnet': ['claude-3-5-haiku-latest', 'gpt-4o-mini'],
+      'claude-3-haiku': ['gpt-4o-mini'],
+      'deepseek-v3': ['deepseek-chat', 'gpt-4o-mini'],
+      'deepseek-r1': ['o4-mini', 'deepseek-chat'],
     };
 
     for (const [key, value] of Object.entries(fallbacks)) {
@@ -532,41 +415,11 @@ export class CostLens {
   }
 
   private getFromCache(key: string): any | null {
-    const entry = this.cache.get(key);
-    if (!entry) return null;
-
-    if (Date.now() - entry.timestamp > entry.ttl) {
-      this.cache.delete(key);
-      return null;
-    }
-
-    // Update access time for LRU
-    entry.lastAccessed = Date.now();
-    return entry.result;
+    return this.cache.get(key);
   }
 
   private setCache(key: string, result: any, ttl: number = 3600000): void {
-    // Implement LRU cache with size limit
-    const maxCacheSize = 1000;
-
-    if (this.cache.size >= maxCacheSize) {
-      // Remove oldest entries
-      const entries = Array.from(this.cache.entries());
-      entries.sort((a, b) => (a[1].lastAccessed || 0) - (b[1].lastAccessed || 0));
-
-      // Remove 20% of oldest entries
-      const toRemove = Math.floor(maxCacheSize * 0.2);
-      for (let i = 0; i < toRemove; i++) {
-        this.cache.delete(entries[i][0]);
-      }
-    }
-
-    this.cache.set(key, {
-      result,
-      timestamp: Date.now(),
-      ttl,
-      lastAccessed: Date.now(),
-    });
+    this.cache.set(key, result, ttl);
   }
 
   private async retryWithBackoff<T>(
@@ -922,36 +775,76 @@ export class CostLens {
           },
 
           // Streaming support
-          async stream(params: any, options?: { promptId?: string }) {
+          async stream(params: any, options?: WrapperOptions) {
+            if (!params?.model || !params?.messages?.length) {
+              throw new Error('CostLens: stream requires model and messages');
+            }
+
+            const originalModel = params.model;
+            if (self.config.smartRouting) {
+              params.model = await self.selectOptimalModel(params.model, params.messages);
+              if (params.model !== originalModel) {
+                self.log('info', `Smart routing (stream): ${originalModel} → ${params.model}`);
+              }
+            }
+
+            if (options?.maxCost || self.config.costLimit) {
+              const estimatedCost = await self.estimateCost(params.model, params.messages);
+              const limit = options?.maxCost || self.config.costLimit || Infinity;
+              if (estimatedCost > limit) {
+                throw new Error(
+                  `Estimated cost $${estimatedCost.toFixed(4)} exceeds limit $${limit}`
+                );
+              }
+            }
+
             const start = Date.now();
             let fullContent = '';
-            let tokensUsed = 0;
+            let completionTokens = 0;
 
             try {
               const stream = await client.chat.completions.create({
                 ...params,
                 stream: true,
+                stream_options: { include_usage: true },
               });
 
-              // Wrap the stream to collect data
               const wrappedStream = {
                 async *[Symbol.asyncIterator]() {
+                  let usage: any = null;
+
                   for await (const chunk of stream) {
-                    const content = chunk.choices[0]?.delta?.content || '';
-                    fullContent += content;
+                    const content = chunk.choices?.[0]?.delta?.content || '';
+                    if (content) {
+                      fullContent += content;
+                      completionTokens++;
+                    }
+
+                    // OpenAI sends usage in the final chunk when stream_options.include_usage is true
+                    if (chunk.usage) {
+                      usage = chunk.usage;
+                    }
+
                     yield chunk;
                   }
 
-                  // Track after stream completes
+                  const inputTokens = usage?.prompt_tokens || self.estimateTokens(params.messages, 'input');
+                  const outputTokens = usage?.completion_tokens || Math.ceil(fullContent.length / 4);
+
                   await self.trackRun({
                     provider: 'openai',
                     promptId: options?.promptId,
                     model: params.model,
+                    requestedModel: originalModel !== params.model ? originalModel : undefined,
                     input: JSON.stringify(params.messages),
                     output: fullContent,
-                    tokensUsed: Math.ceil(fullContent.length / 4), // Rough estimate
+                    tokensUsed: inputTokens + outputTokens,
+                    inputTokens,
+                    outputTokens,
                     latency: Date.now() - start,
                     success: true,
+                    requestId: options?.requestId,
+                    correlationId: options?.correlationId,
                   });
                 },
               };
@@ -1092,6 +985,105 @@ export class CostLens {
 
           throw lastError;
         },
+
+        // Streaming support for Anthropic
+        async stream(params: any, options?: WrapperOptions) {
+          if (!params?.model || !params?.messages?.length) {
+            throw new Error('CostLens: stream requires model and messages');
+          }
+
+          const originalModel = params.model;
+          if (self.config.smartRouting) {
+            params.model = await self.selectOptimalModel(params.model, params.messages);
+            if (params.model !== originalModel) {
+              self.log('info', `Smart routing (stream): ${originalModel} → ${params.model}`);
+            }
+          }
+
+          if (options?.maxCost || self.config.costLimit) {
+            const estimatedCost = await self.estimateCost(params.model, params.messages);
+            const limit = options?.maxCost || self.config.costLimit || Infinity;
+            if (estimatedCost > limit) {
+              throw new Error(
+                `Estimated cost $${estimatedCost.toFixed(4)} exceeds limit $${limit}`
+              );
+            }
+          }
+
+          params = await self.runMiddleware('before', params);
+
+          const start = Date.now();
+          let fullContent = '';
+
+          try {
+            // Use the standard Anthropic streaming API
+            const stream = await client.messages.create({
+              ...params,
+              stream: true,
+            });
+
+            const wrappedStream = {
+              async *[Symbol.asyncIterator]() {
+                let inputTokens = 0;
+                let outputTokens = 0;
+
+                for await (const event of stream) {
+                  // Collect usage from message_start
+                  if (event.type === 'message_start' && event.message?.usage) {
+                    inputTokens = event.message.usage.input_tokens || 0;
+                  }
+
+                  // Collect text content
+                  if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+                    fullContent += event.delta.text;
+                  }
+
+                  // Collect output usage from message_delta
+                  if (event.type === 'message_delta' && event.usage) {
+                    outputTokens = event.usage.output_tokens || 0;
+                  }
+
+                  yield event;
+                }
+
+                // Fallback token estimation if API didn't provide
+                if (!outputTokens) {
+                  outputTokens = Math.ceil(fullContent.length / 4);
+                }
+                if (!inputTokens) {
+                  inputTokens = self.estimateTokens(params.messages, 'input');
+                }
+
+                await self.trackRun({
+                  provider: 'anthropic',
+                  promptId: options?.promptId,
+                  model: params.model,
+                  requestedModel: originalModel !== params.model ? originalModel : undefined,
+                  input: JSON.stringify(params.messages),
+                  output: fullContent,
+                  tokensUsed: inputTokens + outputTokens,
+                  inputTokens,
+                  outputTokens,
+                  latency: Date.now() - start,
+                  success: true,
+                  requestId: options?.requestId,
+                  correlationId: options?.correlationId,
+                });
+              },
+            };
+
+            return wrappedStream;
+          } catch (error) {
+            await self.trackError(
+              'anthropic',
+              params.model,
+              JSON.stringify(params.messages),
+              error as Error,
+              Date.now() - start
+            );
+            throw error;
+          }
+        },
       },
     };
   }
@@ -1156,14 +1148,6 @@ export class CostLens {
       averageLatency: 0, // Placeholder - integrate with your monitoring
       errorRate: 0.02, // Placeholder - integrate with your monitoring
     };
-  }
-
-  // Smart Call: Automatically select cheapest model meeting quality threshold
-  smartCall(client: any) {
-    if (!this.config.apiKey) {
-      throw new Error('SmartCall requires an API key. Please provide one to use cloud features.');
-    }
-    return new SmartCall(client, this.config.apiKey);
   }
 
   // Optimize prompt for cost efficiency
@@ -1707,20 +1691,15 @@ export class CostLens {
 
   // Circuit breaker methods
   private isApiDown(): boolean {
-    const now = Date.now();
-    return (
-      this.apiFailureCount >= this.circuitBreakerThreshold &&
-      now - this.lastApiFailure < this.circuitBreakerTimeout
-    );
+    return this.circuitBreaker.isOpen();
   }
 
   private recordApiFailure(): void {
-    this.apiFailureCount++;
-    this.lastApiFailure = Date.now();
+    this.circuitBreaker.recordFailure();
   }
 
   private resetApiFailures(): void {
-    this.apiFailureCount = 0;
+    this.circuitBreaker.reset();
   }
 }
 

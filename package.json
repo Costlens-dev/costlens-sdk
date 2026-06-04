@@ -1,15 +1,25 @@
 {
   "name": "costlens",
-  "version": "2.0.0",
-  "description": "Smart AI cost optimization with OpenAI and Anthropic support. Automatically routes expensive models to cheaper alternatives while maintaining quality and preventing downgrades.",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "version": "2.1.0",
+  "description": "Smart AI cost optimization with OpenAI and Anthropic support. Automatically routes expensive models to cheaper alternatives while maintaining quality.",
+  "main": "dist/cjs/index.js",
+  "module": "dist/esm/index.js",
+  "types": "dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js",
+      "types": "./dist/cjs/index.d.ts"
+    }
+  },
   "files": [
     "dist",
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build:cjs && npm run build:esm",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:esm": "tsc -p tsconfig.esm.json",
     "test": "jest",
     "lint": "eslint . --ext .ts,.js",
     "lint:fix": "eslint . --ext .ts,.js --fix",
@@ -20,6 +30,7 @@
     "load-test": "ts-node scripts/load-test.ts",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
+    "prepublishOnly": "npm run build",
     "prepare": "husky install"
   },
   "keywords": [
